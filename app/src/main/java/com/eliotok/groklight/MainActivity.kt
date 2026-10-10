@@ -75,6 +75,9 @@ import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
 
+    /** 上次进入后台的时间戳；配合 StateBus.backgroundMs 判断镜像页是否可能已过期。 */
+    private var pausedAt = 0L
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         handleIncomingIntent(intent)
@@ -89,6 +92,17 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         handleIncomingIntent(intent)
+    }
+
+    override fun onPause() {
+        super.onPause()
+        pausedAt = System.currentTimeMillis()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        StateBus.backgroundMs.value =
+            if (pausedAt == 0L) 0L else System.currentTimeMillis() - pausedAt
     }
 
     /** 支持两种配对方式：系统里直接点开远程链接，或把链接文本“分享”给本应用。 */
@@ -307,6 +321,7 @@ private fun WebViewScreen(
     val context = LocalContext.current
     val activity = context as? ComponentActivity
     val recreateTick by StateBus.recreateTick.collectAsState()
+    val backgroundMs by StateBus.backgroundMs.collectAsState()
     var keepOn by remember { mutableStateOf(Prefs.keepScreenOn(context)) }
     var progress by remember { mutableIntStateOf(100) }
     var menuOpen by remember { mutableStateOf(false) }
@@ -337,6 +352,17 @@ private fun WebViewScreen(
 
     LaunchedEffect(Unit) { KeepAliveService.start(context) }
 
+    // 回到前台：若后台停留超过 15 秒且页面 WebSocket 不是 OPEN，直接强制重新加载，
+    // 避免"卡在之前的情景"（息屏/切后台期间漏掉镜像事件）。
+    LaunchedEffect(backgroundMs) {
+        if (backgroundMs < 15_000L) return@LaunchedEffect
+        val wv = webViewRef.value ?: return@LaunchedEffect
+        wv.evaluateJavascript(WS_STATE_JS) { result ->
+            val state = result?.trim('"')?.substringBefore(':') ?: "unknown"
+            if (state != "open") hardReload(wv)
+        }
+    }
+
     LaunchedEffect(keepOn) {
         Prefs.setKeepScreenOn(context, keepOn)
         if (keepOn) activity?.window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -358,8 +384,8 @@ private fun WebViewScreen(
             }
             DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
                 DropdownMenuItem(
-                    text = { Text("重新加载页面") },
-                    onClick = { menuOpen = false; webViewRef.value?.reload() },
+                    text = { Text("强制重新同步") },
+                    onClick = { menuOpen = false; webViewRef.value?.let { hardReload(it) } },
                 )
                 DropdownMenuItem(
                     text = { Text("检查更新") },
@@ -465,6 +491,40 @@ private fun UpdateDialog(
     }
 }
 
+/** 注入页面的探针：记录镜像页 WebSocket 的状态，用来判断"卡在旧情景"是否因为连接已断。 */
+private const val WS_PROBE_JS = """
+(function(){
+  if (window.__glProbe) return;
+  window.__glProbe = { state: 'unknown', lastMsg: Date.now(), closes: 0 };
+  var Native = window.WebSocket;
+  if (!Native) return;
+  function Patched(url, protocols) {
+    var ws = (protocols === undefined) ? new Native(url) : new Native(url, protocols);
+    try {
+      window.__glProbe.state = 'open';
+      ws.addEventListener('open', function(){ window.__glProbe.state = 'open'; });
+      ws.addEventListener('message', function(){ window.__glProbe.lastMsg = Date.now(); });
+      ws.addEventListener('close', function(){ window.__glProbe.closes++; window.__glProbe.state = 'closed'; });
+      ws.addEventListener('error', function(){ window.__glProbe.state = 'error'; });
+    } catch (e) {}
+    return ws;
+  }
+  Patched.prototype = Native.prototype;
+  try { Patched.CONNECTING = Native.CONNECTING; Patched.OPEN = Native.OPEN; Patched.CLOSING = Native.CLOSING; Patched.CLOSED = Native.CLOSED; } catch (e) {}
+  try { window.WebSocket = Patched; } catch (e) {}
+})();
+"""
+
+/** 读取探针状态：open / closed / error / unknown。 */
+private const val WS_STATE_JS =
+    "(function(){try{var p=window.__glProbe;if(!p)return 'unknown';return p.state;}catch(e){return 'unknown';}})()"
+
+/** 绕过缓存重新加载：镜像页是实时界面，宁可重取 HTML 也不要停在旧状态。 */
+private fun hardReload(webView: WebView) {
+    webView.settings.cacheMode = WebSettings.LOAD_NO_CACHE
+    webView.reload()
+}
+
 @SuppressLint("SetJavaScriptEnabled")
 private fun createWebView(
     ctx: Context,
@@ -491,6 +551,14 @@ private fun createWebView(
         settings.mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
 
         webViewClient = object : WebViewClient() {
+            override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
+                view?.evaluateJavascript(WS_PROBE_JS, null)
+            }
+
+            override fun onPageFinished(view: WebView?, url: String?) {
+                view?.evaluateJavascript(WS_PROBE_JS, null)
+            }
+
             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
                 val target = request.url
                 // 只把「本机镜像页」留在应用内，其余链接交给系统浏览器，避免把工作台导航走

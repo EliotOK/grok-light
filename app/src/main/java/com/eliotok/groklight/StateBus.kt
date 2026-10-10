@@ -12,4 +12,7 @@ object StateBus {
 
     /** WebView 渲染进程崩溃后请求重建界面的计数。 */
     val recreateTick = MutableStateFlow(0)
+
+    /** 本次回到前台前，应用在后台停留了多久（毫秒）：用于判断镜像页是否已经过期。 */
+    val backgroundMs = MutableStateFlow(0L)
 }

@@ -1,0 +1,57 @@
+# Grok Light
+
+让手机稳定连接电脑端 **Grok App（Grok Build CLI 的桌面壳)「远程控制」镜像页** 的原生 Android 客户端。与 [zcode-light](https://github.com/EliotOK/zcode-light)、[codex-lan](https://github.com/EliotOK/codex-lan) 同一思路：**官方页面 + 本地壳层保活**，不做任何协议逆向。
+
+## 为什么需要它
+
+Grok App 的「远程控制」给的是「手机浏览器打开 `http://<电脑IP>:<端口>/t/<token>/`」，链路是：
+
+```
+手机页面  ⇄  ws://<电脑IP>:<端口>/t/<token>/ws  ⇄  桌面端 Grok App
+```
+
+直接拿手机浏览器用，有两个天生缺陷：
+
+1. **切后台即冻结**：息屏或切后台会挂起页面（冻结定时器、断开 WebSocket），回到前台时镜像已经掉线；
+2. **面板给的主机可能是错的**：当电脑上跑着代理软件（Clash / Mihomo 等）的 TUN 时，面板可能把**虚拟网卡**的地址（常见 `198.18.x.x`，或回环 `127.0.0.1`）当成局域网地址写进链接。这些地址在手机上没有任何路由可达，表现就是**一直转圈加载不出来** —— 不是网络慢，是根本没连上。
+
+## 做法
+
+- **内嵌官方镜像页**：WebView 加载面板给出的链接，功能、UI、审批流程全部与官方一致；
+- **主机自动纠正**：粘贴链接时，若主机是回环或 `198.18.x.x` 这类不可达地址，自动替换成你填写的电脑局域网 IP（只在本机改写，不影响桌面端）；
+- **前台保活服务**：`dataSync` 前台服务 + 常驻通知、`PARTIAL_WAKE_LOCK`、低延迟 WiFi 锁、网络恢复后自动重载、30 秒心跳探测；
+- **便捷配对**：粘贴链接 / 手机相机扫码后可直接唤起本应用（已注册 `http(s)://…/t/` 意图过滤器）/ 把链接文本分享给本应用；
+- **兜底**：WebView 渲染进程崩溃自动重建、页面内 JS 弹窗正常弹出、站外链接交给系统浏览器、页面内下载交给系统下载器；
+- **支持明文 HTTP**：局域网自建服务没有证书，manifest 中放开 `usesCleartextTraffic`。
+
+## 构建与安装
+
+仓库已配置 GitHub Actions（`.github/workflows/build-apk.yml`）：
+
+1. 推到 `main`：Actions 产出 artifact `grok-light-debug-apk`；
+2. 打 tag（如 `v0.1.0`）：APK 与 `.apk.sha256` 自动挂到 Release。
+
+本地构建要求 JDK 17、Android SDK 34（`gradlew assembleDebug`）。需要 Android 8.0+（minSdk 26）。
+
+## 使用
+
+1. 电脑端 Grok App → 设置 → **远程控制** → 启动主机、打开「允许同一 Wi-Fi」，复制镜像链接；
+2. 在电脑上 `ipconfig` 找到**真实网卡**的 IPv4（以太网 / WLAN，别选 Clash、Mihomo、Tailscale 这类虚拟网卡）；
+3. 手机上打开本应用，粘贴链接；若链接主机是 `198.18.x.x` 或 `127.0.0.1`，把第 2 步那个 IPv4 填进「电脑局域网 IP」，点「配对并连接」；
+4. 建议在配对页点一次「申请忽略电池优化」，避免系统在息屏后冻结保活服务。
+
+## 已知边界
+
+- **明文 http 不是安全上下文**：浏览器不会提供 `getUserMedia`（语音输入）和 `navigator.clipboard`（网页里的复制按钮），这是网页标准限制，壳层无法绕过；需要语音就改用 https 隧道（cloudflared 等）链接 —— 那种链接主机本身就是可达的，直接粘贴、无需改写；
+- 电脑端点「重新生成链接」会作废旧令牌，需要在应用里重新粘贴；
+- 电脑关机 / 休眠 / 退出 Grok App 会断连，这是服务端不在，不是客户端问题；
+- 审批与权限以官方页面为准，本应用不额外提权。
+
+## 隐私
+
+镜像链接（含访问令牌）只保存在手机本地 `SharedPreferences`，不上传任何服务器；应用不收集、不统计任何数据。**请把这条链接当作密码保管**：拿到它的人就能操作你电脑上的 Agent。
+
+## 相关
+
+- [zcode-light](https://github.com/EliotOK/zcode-light)：ZCode 远程控制的原生保活壳
+- [codex-lan](https://github.com/EliotOK/codex-lan)：Codex Desktop 的局域网客户端与 Windows 桥

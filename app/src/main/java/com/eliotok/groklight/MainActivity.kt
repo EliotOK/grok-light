@@ -1,27 +1,29 @@
 package com.eliotok.groklight
 
-import android.app.DownloadManager
 import android.annotation.SuppressLint
 import android.app.AlertDialog
+import android.app.DownloadManager
 import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
-import android.os.Environment
 import android.os.Bundle
+import android.os.Environment
 import android.provider.Settings
 import android.view.ViewGroup
 import android.view.WindowManager
-import android.webkit.PermissionRequest
 import android.webkit.JsResult
+import android.webkit.PermissionRequest
 import android.webkit.RenderProcessGoneDetail
 import android.webkit.URLUtil
 import android.webkit.ValueCallback
-import android.webkit.WebSettings
 import android.webkit.WebChromeClient
+import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
+import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.ComponentActivity
@@ -30,6 +32,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -37,6 +40,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -75,7 +79,7 @@ import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
 
-    /** 上次进入后台的时间戳；配合 StateBus.backgroundMs 判断镜像页是否可能已过期。 */
+    /** Timestamp of the last onPause; feeds StateBus.backgroundMs. */
     private var pausedAt = 0L
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -84,7 +88,16 @@ class MainActivity : ComponentActivity() {
         requestNotificationPermission()
         setContent {
             MaterialTheme(colorScheme = darkColorScheme()) {
-                App()
+                // Edge-to-edge on Android 15/16 draws under the system bars. Without
+                // this the toolbar sits behind the status bar and the user cannot
+                // reach "换链接" — the exact white-screen dead end reported on device.
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .safeDrawingPadding(),
+                ) {
+                    App()
+                }
             }
         }
     }
@@ -105,7 +118,7 @@ class MainActivity : ComponentActivity() {
             if (pausedAt == 0L) 0L else System.currentTimeMillis() - pausedAt
     }
 
-    /** 支持两种配对方式：系统里直接点开远程链接，或把链接文本“分享”给本应用。 */
+    /** Pair from a tapped mirror link (VIEW) or a shared link (SEND). */
     private fun handleIncomingIntent(intent: Intent?) {
         val candidate = when (intent?.action) {
             Intent.ACTION_VIEW -> intent.dataString
@@ -260,7 +273,8 @@ private fun PairScreen(onSave: (String) -> Unit, onCheckUpdate: () -> Unit) {
         Spacer(Modifier.height(8.dp))
         Text(
             "提示：面板给的主机若是 198.18.x.x、127.0.0.1 这类地址，说明它挑错了网卡" +
-                "（常见于开着 Clash / Mihomo 的 TUN），此时必须填电脑真实的局域网 IP。",
+                "（常见于开着 Clash / Mihomo 的 TUN），此时必须填电脑真实的局域网 IP。" +
+                "另外，桌面端重启后端口和令牌都可能变化，链接要重新复制。",
             style = MaterialTheme.typography.bodySmall,
             color = Color.Gray,
         )
@@ -280,18 +294,18 @@ private fun PairScreen(onSave: (String) -> Unit, onCheckUpdate: () -> Unit) {
             },
             modifier = Modifier.fillMaxWidth(),
         ) { Text("配对并连接") }
-        Spacer(Modifier.height(24.dp))
+        Spacer(Modifier.height(20.dp))
         OutlinedButton(
             onClick = { requestIgnoreBatteryOptimization(context) },
             modifier = Modifier.fillMaxWidth(),
         ) { Text("申请忽略电池优化（建议）") }
-        Spacer(Modifier.height(12.dp))
+        Spacer(Modifier.height(10.dp))
         OutlinedButton(onClick = onCheckUpdate, modifier = Modifier.fillMaxWidth()) {
             Text("检查更新（当前 v${BuildConfig.VERSION_NAME}）")
         }
-        Spacer(Modifier.height(24.dp))
+        Spacer(Modifier.height(20.dp))
         Text(
-            "链接（含访问令牌）只保存在本机，不会上传；电脑端重新生成链接后，在这里更新即可。",
+            "链接（含访问令牌）只保存在本机，不会上传。",
             style = MaterialTheme.typography.bodySmall,
             color = Color.Gray,
         )
@@ -325,17 +339,23 @@ private fun WebViewScreen(
     var keepOn by remember { mutableStateOf(Prefs.keepScreenOn(context)) }
     var progress by remember { mutableIntStateOf(100) }
     var menuOpen by remember { mutableStateOf(false) }
+    var loadError by remember { mutableStateOf<String?>(null) }
     var pendingFilePathCallback by remember { mutableStateOf<ValueCallback<Array<Uri>>?>(null) }
     val webViewRef = remember { mutableStateOf<WebView?>(null) }
 
-    // 官方页面的文件/图片上传依赖 <input type="file">，由系统选择器承接
     val fileChooserLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.StartActivityForResult()
+        ActivityResultContracts.StartActivityForResult(),
     ) { result ->
         val callback = pendingFilePathCallback
         pendingFilePathCallback = null
-        callback?.onReceiveValue(
-            WebChromeClient.FileChooserParams.parseResult(result.resultCode, result.data)
+        if (callback == null) return@rememberLauncherForActivityResult
+        val data = result.data
+        callback.onReceiveValue(
+            if (result.resultCode == android.app.Activity.RESULT_OK && data != null) {
+                WebChromeClient.FileChooserParams.parseResult(result.resultCode, data)
+            } else {
+                null
+            },
         )
     }
     val onFileChooser: (ValueCallback<Array<Uri>>, WebChromeClient.FileChooserParams) -> Unit =
@@ -352,8 +372,8 @@ private fun WebViewScreen(
 
     LaunchedEffect(Unit) { KeepAliveService.start(context) }
 
-    // 回到前台：若后台停留超过 15 秒且页面 WebSocket 不是 OPEN，直接强制重新加载，
-    // 避免"卡在之前的情景"（息屏/切后台期间漏掉镜像事件）。
+    // Foreground return: when the page WebSocket is no longer OPEN, reload without
+    // cache so the phone never keeps showing a frozen previous scene.
     LaunchedEffect(backgroundMs) {
         if (backgroundMs < 15_000L) return@LaunchedEffect
         val wv = webViewRef.value ?: return@LaunchedEffect
@@ -373,12 +393,18 @@ private fun WebViewScreen(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 6.dp),
+                .padding(horizontal = 10.dp, vertical = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text(status, style = MaterialTheme.typography.labelMedium, modifier = Modifier.weight(1f))
-            Text("息屏常亮", style = MaterialTheme.typography.labelMedium)
+            Text(
+                status,
+                style = MaterialTheme.typography.labelMedium,
+                modifier = Modifier.weight(1f),
+            )
+            Text("常亮", style = MaterialTheme.typography.labelMedium)
             Switch(checked = keepOn, onCheckedChange = { keepOn = it })
+            TextButton(onClick = { webViewRef.value?.let { hardReload(it) } }) { Text("刷新") }
+            TextButton(onClick = onUpdateCheck) { Text("更新") }
             IconButton(onClick = { menuOpen = true }) {
                 Icon(Icons.Filled.MoreVert, contentDescription = "菜单")
             }
@@ -388,12 +414,12 @@ private fun WebViewScreen(
                     onClick = { menuOpen = false; webViewRef.value?.let { hardReload(it) } },
                 )
                 DropdownMenuItem(
-                    text = { Text("检查更新") },
-                    onClick = { menuOpen = false; onUpdateCheck() },
-                )
-                DropdownMenuItem(
                     text = { Text("换链接") },
                     onClick = { menuOpen = false; onClearLink() },
+                )
+                DropdownMenuItem(
+                    text = { Text("申请忽略电池优化") },
+                    onClick = { menuOpen = false; requestIgnoreBatteryOptimization(context) },
                 )
             }
         }
@@ -403,21 +429,62 @@ private fun WebViewScreen(
                 modifier = Modifier.fillMaxWidth(),
             )
         }
-        // recreateTick 变化（渲染进程崩溃）时强制重建 WebView
-        key(recreateTick) {
-            AndroidView(
+        val failure = loadError
+        if (failure != null) {
+            // Dead-end guard: a rotated token or a changed LAN port used to leave a
+            // blank page with no visible control to pair again.
+            Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .weight(1f),
-                factory = { ctx ->
-                    createWebView(
-                        ctx = ctx,
-                        url = url,
-                        onProgress = { progress = it },
-                        onFileChooser = onFileChooser,
-                    ).also { webViewRef.value = it }
-                },
-            )
+                    .weight(1f)
+                    .padding(24.dp),
+                verticalArrangement = Arrangement.Center,
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                Text("连接不上镜像主机", style = MaterialTheme.typography.titleMedium)
+                Spacer(Modifier.height(10.dp))
+                Text(
+                    failure,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Color.Gray,
+                )
+                Spacer(Modifier.height(6.dp))
+                Text(url, style = MaterialTheme.typography.bodySmall, color = Color.Gray)
+                Spacer(Modifier.height(18.dp))
+                Button(
+                    onClick = {
+                        loadError = null
+                        StateBus.recreateTick.value++
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text("重试") }
+                Spacer(Modifier.height(10.dp))
+                OutlinedButton(onClick = onClearLink, modifier = Modifier.fillMaxWidth()) {
+                    Text("换链接（重新配对）")
+                }
+                Spacer(Modifier.height(10.dp))
+                OutlinedButton(onClick = onUpdateCheck, modifier = Modifier.fillMaxWidth()) {
+                    Text("检查更新")
+                }
+            }
+        } else {
+            // recreateTick 变化（渲染进程崩溃 / 手动重试）时强制重建 WebView
+            key(recreateTick) {
+                AndroidView(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f),
+                    factory = { ctx ->
+                        createWebView(
+                            ctx = ctx,
+                            url = url,
+                            onProgress = { progress = it },
+                            onFileChooser = onFileChooser,
+                            onLoadError = { loadError = it },
+                        ).also { webViewRef.value = it }
+                    },
+                )
+            }
         }
     }
 
@@ -491,7 +558,7 @@ private fun UpdateDialog(
     }
 }
 
-/** 注入页面的探针：记录镜像页 WebSocket 的状态，用来判断"卡在旧情景"是否因为连接已断。 */
+/** Page probe: remembers whether the mirror page WebSocket is still open. */
 private const val WS_PROBE_JS = """
 (function(){
   if (window.__glProbe) return;
@@ -515,11 +582,11 @@ private const val WS_PROBE_JS = """
 })();
 """
 
-/** 读取探针状态：open / closed / error / unknown。 */
+/** Reads the probe: open / closed / error / unknown. */
 private const val WS_STATE_JS =
     "(function(){try{var p=window.__glProbe;if(!p)return 'unknown';return p.state;}catch(e){return 'unknown';}})()"
 
-/** 绕过缓存重新加载：镜像页是实时界面，宁可重取 HTML 也不要停在旧状态。 */
+/** Reload without cache: the mirror page is live state, never a stale snapshot. */
 private fun hardReload(webView: WebView) {
     webView.settings.cacheMode = WebSettings.LOAD_NO_CACHE
     webView.reload()
@@ -531,6 +598,7 @@ private fun createWebView(
     url: String,
     onProgress: (Int) -> Unit,
     onFileChooser: (ValueCallback<Array<Uri>>, WebChromeClient.FileChooserParams) -> Unit,
+    onLoadError: (String) -> Unit,
 ): WebView {
     val homeUri = Uri.parse(url)
     val homeHost = homeUri.host
@@ -547,7 +615,7 @@ private fun createWebView(
         settings.allowFileAccess = false
         settings.allowContentAccess = false
         settings.javaScriptCanOpenWindowsAutomatically = true
-        // 镜像页是局域网明文 http，放宽混合内容限制，避免个别资源被拦
+        // The mirror page is plain http on the LAN; keep ws/wss usable.
         settings.mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
 
         webViewClient = object : WebViewClient() {
@@ -561,7 +629,7 @@ private fun createWebView(
 
             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
                 val target = request.url
-                // 只把「本机镜像页」留在应用内，其余链接交给系统浏览器，避免把工作台导航走
+                // Keep the mirror page (and its media route) in-app; send the rest out.
                 val sameMirror = target.host != null && target.host == homeHost &&
                     (target.port == homePort || target.port == -1)
                 if (sameMirror) return false
@@ -570,6 +638,30 @@ private fun createWebView(
                     true
                 } catch (_: ActivityNotFoundException) {
                     true
+                }
+            }
+
+            override fun onReceivedError(
+                view: WebView,
+                request: WebResourceRequest,
+                error: WebResourceError,
+            ) {
+                if (!request.isForMainFrame) return
+                onLoadError("网络错误：${error.description}")
+            }
+
+            override fun onReceivedHttpError(
+                view: WebView,
+                request: WebResourceRequest,
+                response: WebResourceResponse,
+            ) {
+                if (!request.isForMainFrame) return
+                val code = response.statusCode
+                if (code == 401 || code == 403) {
+                    onLoadError(
+                        "链接已失效（HTTP $code）。桌面端重启后端口与令牌都可能变化，" +
+                            "请到「远程控制」面板重新复制链接。",
+                    )
                 }
             }
 
@@ -597,8 +689,8 @@ private fun createWebView(
             }
 
             override fun onPermissionRequest(request: PermissionRequest) {
-                // 明文 http 不是安全上下文，浏览器不会发 getUserMedia；
-                // 这里只在系统已授权麦克风时放行，供将来的 https 隧道链接使用。
+                // getUserMedia needs a secure context, so this only fires for https
+                // mirror links; grant only when the OS already allowed the mic.
                 val wantsAudio =
                     request.resources.any { it == PermissionRequest.RESOURCE_AUDIO_CAPTURE }
                 val granted =
@@ -635,7 +727,8 @@ private fun createWebView(
             }
         }
 
-        // 镜像页里的图片/附件下载交给系统下载器（访问令牌在 URL 路径里，下载器不需要登录态）
+        // Downloads (chat images/attachments) go to the system downloader; the token
+        // lives in the URL path, so it needs no session.
         setDownloadListener { downloadUrl, _, _, _, _ ->
             try {
                 val request = DownloadManager.Request(Uri.parse(downloadUrl)).apply {

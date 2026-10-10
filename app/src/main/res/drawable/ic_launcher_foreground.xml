@@ -4,7 +4,16 @@
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
+    <!-- photo card -->
     <path
-        android:fillColor="#FFFFFF"
-        android:pathData="M36,36 L72,36 L72,44 L52,64 L72,64 L72,72 L36,72 L36,64 L56,44 L36,44 Z" />
+        android:fillColor="#EAF2FF"
+        android:pathData="M36,34 L72,34 A8,8 0 0 1 80,42 L80,66 A8,8 0 0 1 72,74 L36,74 A8,8 0 0 1 28,66 L28,42 A8,8 0 0 1 36,34 Z" />
+    <!-- sun -->
+    <path
+        android:fillColor="#7CC4FF"
+        android:pathData="M43,47 m-5,0 a5,5 0 1,0 10,0 a5,5 0 1,0 -10,0 Z" />
+    <!-- mountains, cut out of the card so the mark stays a photo -->
+    <path
+        android:fillColor="#0E1B2C"
+        android:pathData="M31,70 L47,52 L58,63 L66,55 L77,70 Z" />
 </vector>

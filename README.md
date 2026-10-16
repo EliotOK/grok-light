@@ -28,6 +28,7 @@ Grok App 的「远程控制」给的是「手机浏览器打开 `http://<电脑I
 ## 更新记录
 
 - **v0.1.3**
+  - 发布构建使用固定签名；从旧版临时签名迁移时需重装一次，此后可覆盖升级。
   - 配对链接变化后立即重建 WebView，并释放旧页面。
   - 页面加载超时或关键资源失败时显示重试入口；连接状态以镜像 WebSocket 为准。
   - 配合桌面端保存的端口、令牌与访问设置，重启电脑端应用后继续使用原局域网链接。
@@ -43,6 +44,8 @@ Grok App 的「远程控制」给的是「手机浏览器打开 `http://<电脑I
 ## 构建与安装
 
 仓库已配置 GitHub Actions（`.github/workflows/build-apk.yml`）：
+
+发布签名保存在仓库 Secrets：`GROK_LIGHT_KEYSTORE_BASE64`（PKCS#12，别名 `grok-light`）与 `GROK_LIGHT_KEYSTORE_PASSWORD`。CI 要求这两项同时存在，所有 APK 构建共用此签名。
 
 1. 推到 `main`：Actions 产出 artifact `grok-light-debug-apk`；
 2. 打 tag（如 `v0.1.0`）：APK 与 `.apk.sha256` 自动挂到 Release。

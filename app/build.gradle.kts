@@ -4,6 +4,9 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
+val stableKeystore = providers.environmentVariable("GROK_LIGHT_KEYSTORE").orNull
+val stablePassword = providers.environmentVariable("GROK_LIGHT_KEYSTORE_PASSWORD").orNull
+
 android {
     namespace = "com.eliotok.groklight"
     compileSdk = 34
@@ -16,9 +19,25 @@ android {
         versionName = "0.1.3"
     }
 
+    signingConfigs {
+        if (!stableKeystore.isNullOrBlank()) {
+            require(!stablePassword.isNullOrBlank()) { "Stable signing requires a keystore password" }
+            create("stable") {
+                storeFile = file(stableKeystore)
+                storePassword = stablePassword
+                keyAlias = "grok-light"
+                keyPassword = stablePassword
+            }
+        }
+    }
+
     buildTypes {
+        debug {
+            if (!stableKeystore.isNullOrBlank()) signingConfig = signingConfigs.getByName("stable")
+        }
         release {
             isMinifyEnabled = false
+            if (!stableKeystore.isNullOrBlank()) signingConfig = signingConfigs.getByName("stable")
         }
     }
 

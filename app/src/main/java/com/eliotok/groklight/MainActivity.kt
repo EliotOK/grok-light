@@ -31,6 +31,7 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -47,6 +48,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
@@ -56,10 +58,12 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -68,6 +72,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -88,15 +93,15 @@ class MainActivity : ComponentActivity() {
         requestNotificationPermission()
         setContent {
             MaterialTheme(colorScheme = darkColorScheme()) {
-                // Edge-to-edge on Android 15/16 draws under the system bars. Without
-                // this the toolbar sits behind the status bar and the user cannot
-                // reach "换链接" — the exact white-screen dead end reported on device.
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .safeDrawingPadding(),
-                ) {
-                    App()
+                // Keep native controls clear of Android 15/16 system bars.
+                Surface(modifier = Modifier.fillMaxSize()) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .safeDrawingPadding(),
+                    ) {
+                        App()
+                    }
                 }
             }
         }
@@ -148,6 +153,7 @@ private fun App() {
     val status by StateBus.status.collectAsState()
     val scope = rememberCoroutineScope()
     var updateUi by remember { mutableStateOf<Updater.UpdateUi>(Updater.UpdateUi.Hidden) }
+    var pairingMessage by rememberSaveable(remoteUrl) { mutableStateOf<String?>(null) }
 
     fun checkUpdate(manual: Boolean) {
         scope.launch {
@@ -196,11 +202,15 @@ private fun App() {
         }
     }
 
-    if (remoteUrl.isEmpty()) {
+    if (remoteUrl.isEmpty() || pairingMessage != null) {
         PairScreen(
+            initialUrl = remoteUrl,
+            connectionError = pairingMessage.orEmpty(),
             onSave = { url ->
                 Prefs.setRemoteUrl(context, url)
                 StateBus.remoteUrl.value = url
+                StateBus.status.value = "正在连接镜像主机…"
+                pairingMessage = null
             },
             onCheckUpdate = { checkUpdate(manual = true) },
         )
@@ -209,11 +219,8 @@ private fun App() {
             url = remoteUrl,
             status = status,
             onUpdateCheck = { checkUpdate(manual = true) },
-            onClearLink = {
-                Prefs.setRemoteUrl(context, "")
-                StateBus.remoteUrl.value = ""
-                context.stopService(Intent(context, KeepAliveService::class.java))
-            },
+            onEditLink = { pairingMessage = "" },
+            onConnectionFailed = { pairingMessage = it },
         )
     }
 
@@ -225,10 +232,15 @@ private fun App() {
 }
 
 @Composable
-private fun PairScreen(onSave: (String) -> Unit, onCheckUpdate: () -> Unit) {
+private fun PairScreen(
+    initialUrl: String,
+    connectionError: String,
+    onSave: (String) -> Unit,
+    onCheckUpdate: () -> Unit,
+) {
     val context = LocalContext.current
-    var text by remember { mutableStateOf("") }
-    var lanHost by remember { mutableStateOf(Prefs.lanHost(context)) }
+    var text by rememberSaveable(initialUrl) { mutableStateOf(initialUrl) }
+    var lanHost by rememberSaveable { mutableStateOf(Prefs.lanHost(context)) }
     var error by remember { mutableStateOf("") }
 
     Column(
@@ -239,6 +251,12 @@ private fun PairScreen(onSave: (String) -> Unit, onCheckUpdate: () -> Unit) {
         verticalArrangement = Arrangement.Center,
     ) {
         Text("Grok Light", style = MaterialTheme.typography.headlineMedium)
+        if (connectionError.isNotEmpty()) {
+            Spacer(Modifier.height(12.dp))
+            Text("连接已断开", style = MaterialTheme.typography.titleMedium)
+            Text(connectionError, color = MaterialTheme.colorScheme.error)
+            Text("原链接已保留。可以尝试重连，或粘贴电脑端的新链接。")
+        }
         Spacer(Modifier.height(8.dp))
         Text(
             "把电脑端 Grok App「远程控制」里的镜像链接粘贴到这里，" +
@@ -274,7 +292,7 @@ private fun PairScreen(onSave: (String) -> Unit, onCheckUpdate: () -> Unit) {
         Text(
             "提示：面板给的主机若是 198.18.x.x、127.0.0.1 这类地址，说明它挑错了网卡" +
                 "（常见于开着 Clash / Mihomo 的 TUN），此时必须填电脑真实的局域网 IP。" +
-                "另外，桌面端重启后端口和令牌都可能变化，链接要重新复制。",
+                "配对链接由桌面端保存；重新生成链接或电脑局域网 IP 改变后，需要重新配对。",
             style = MaterialTheme.typography.bodySmall,
             color = Color.Gray,
         )
@@ -293,7 +311,7 @@ private fun PairScreen(onSave: (String) -> Unit, onCheckUpdate: () -> Unit) {
                 }
             },
             modifier = Modifier.fillMaxWidth(),
-        ) { Text("配对并连接") }
+        ) { Text(if (initialUrl.isEmpty()) "配对并连接" else "尝试重连") }
         Spacer(Modifier.height(20.dp))
         OutlinedButton(
             onClick = { requestIgnoreBatteryOptimization(context) },
@@ -330,7 +348,8 @@ private fun WebViewScreen(
     url: String,
     status: String,
     onUpdateCheck: () -> Unit,
-    onClearLink: () -> Unit,
+    onEditLink: () -> Unit,
+    onConnectionFailed: (String) -> Unit,
 ) {
     val context = LocalContext.current
     val activity = context as? ComponentActivity
@@ -339,7 +358,9 @@ private fun WebViewScreen(
     var keepOn by remember { mutableStateOf(Prefs.keepScreenOn(context)) }
     var progress by remember { mutableIntStateOf(100) }
     var menuOpen by remember { mutableStateOf(false) }
-    var loadError by remember { mutableStateOf<String?>(null) }
+    var connectionStage by remember(url, recreateTick) {
+        mutableStateOf(MirrorConnectionStage.CONNECTING)
+    }
     var pendingFilePathCallback by remember { mutableStateOf<ValueCallback<Array<Uri>>?>(null) }
     val webViewRef = remember { mutableStateOf<WebView?>(null) }
 
@@ -370,7 +391,15 @@ private fun WebViewScreen(
             }
         }
 
-    LaunchedEffect(Unit) { KeepAliveService.start(context) }
+    DisposableEffect(Unit) {
+        KeepAliveService.start(context)
+        onDispose {
+            context.stopService(Intent(context, KeepAliveService::class.java))
+            pendingFilePathCallback?.onReceiveValue(null)
+            pendingFilePathCallback = null
+            activity?.window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
+    }
 
     // Foreground return: when the page WebSocket is no longer OPEN, reload without
     // cache so the phone never keeps showing a frozen previous scene.
@@ -415,7 +444,7 @@ private fun WebViewScreen(
                 )
                 DropdownMenuItem(
                     text = { Text("换链接") },
-                    onClick = { menuOpen = false; onClearLink() },
+                    onClick = { menuOpen = false; onEditLink() },
                 )
                 DropdownMenuItem(
                     text = { Text("申请忽略电池优化") },
@@ -429,61 +458,47 @@ private fun WebViewScreen(
                 modifier = Modifier.fillMaxWidth(),
             )
         }
-        val failure = loadError
-        if (failure != null) {
-            // Dead-end guard: a rotated token or a changed LAN port used to leave a
-            // blank page with no visible control to pair again.
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .weight(1f)
-                    .padding(24.dp),
-                verticalArrangement = Arrangement.Center,
-                horizontalAlignment = Alignment.CenterHorizontally,
-            ) {
-                Text("连接不上镜像主机", style = MaterialTheme.typography.titleMedium)
-                Spacer(Modifier.height(10.dp))
-                Text(
-                    failure,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = Color.Gray,
-                )
-                Spacer(Modifier.height(6.dp))
-                Text(url, style = MaterialTheme.typography.bodySmall, color = Color.Gray)
-                Spacer(Modifier.height(18.dp))
-                Button(
-                    onClick = {
-                        loadError = null
-                        StateBus.recreateTick.value++
-                    },
-                    modifier = Modifier.fillMaxWidth(),
-                ) { Text("重试") }
-                Spacer(Modifier.height(10.dp))
-                OutlinedButton(onClick = onClearLink, modifier = Modifier.fillMaxWidth()) {
-                    Text("换链接（重新配对）")
-                }
-                Spacer(Modifier.height(10.dp))
-                OutlinedButton(onClick = onUpdateCheck, modifier = Modifier.fillMaxWidth()) {
-                    Text("检查更新")
-                }
-            }
-        } else {
-            // recreateTick 变化（渲染进程崩溃 / 手动重试）时强制重建 WebView
-            key(recreateTick) {
+        Box(Modifier.fillMaxWidth().weight(1f)) {
+            // Recreate the page when its URL or renderer changes.
+            key(url, recreateTick) {
                 AndroidView(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .weight(1f),
+                    modifier = Modifier.fillMaxSize(),
                     factory = { ctx ->
                         createWebView(
                             ctx = ctx,
                             url = url,
                             onProgress = { progress = it },
                             onFileChooser = onFileChooser,
-                            onLoadError = { loadError = it },
+                            onLoadError = onConnectionFailed,
+                            onConnectionStage = { connectionStage = it },
                         ).also { webViewRef.value = it }
                     },
+                    onRelease = { view ->
+                        if (WebViewHolder.webView === view) WebViewHolder.reset()
+                        if (webViewRef.value === view) webViewRef.value = null
+                        view.stopLoading()
+                        view.destroy()
+                    },
                 )
+            }
+            if (connectionStage != MirrorConnectionStage.CONNECTED) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(MaterialTheme.colorScheme.background)
+                        .padding(24.dp),
+                    verticalArrangement = Arrangement.Center,
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    CircularProgressIndicator()
+                    Spacer(Modifier.height(16.dp))
+                    Text(
+                        if (connectionStage == MirrorConnectionStage.RECONNECTING)
+                            "连接已断开，正在尝试重连…" else "正在连接镜像主机…",
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    OutlinedButton(onClick = onEditLink) { Text("修改链接") }
+                }
             }
         }
     }
@@ -568,7 +583,7 @@ private const val WS_PROBE_JS = """
   function Patched(url, protocols) {
     var ws = (protocols === undefined) ? new Native(url) : new Native(url, protocols);
     try {
-      window.__glProbe.state = 'open';
+      window.__glProbe.state = 'connecting';
       ws.addEventListener('open', function(){ window.__glProbe.state = 'open'; });
       ws.addEventListener('message', function(){ window.__glProbe.lastMsg = Date.now(); });
       ws.addEventListener('close', function(){ window.__glProbe.closes++; window.__glProbe.state = 'closed'; });
@@ -584,7 +599,7 @@ private const val WS_PROBE_JS = """
 
 /** Reads the probe: open / closed / error / unknown. */
 private const val WS_STATE_JS =
-    "(function(){try{var p=window.__glProbe;if(!p)return 'unknown';return p.state;}catch(e){return 'unknown';}})()"
+    "(function(){var h=window.__GROK_MIRROR_HEALTH__;var p=window.__glProbe;return h?h.connection:(p?p.state:'unknown');})()"
 
 /** Reload without cache: the mirror page is live state, never a stale snapshot. */
 private fun hardReload(webView: WebView) {
@@ -599,17 +614,61 @@ private fun createWebView(
     onProgress: (Int) -> Unit,
     onFileChooser: (ValueCallback<Array<Uri>>, WebChromeClient.FileChooserParams) -> Unit,
     onLoadError: (String) -> Unit,
+    onConnectionStage: (MirrorConnectionStage) -> Unit,
 ): WebView {
     val homeUri = Uri.parse(url)
     val homeHost = homeUri.host
     val homePort = homeUri.port
 
     return WebView(ctx).apply {
+        setBackgroundColor(android.graphics.Color.rgb(18, 19, 24))
+        val pageView = this
+        val monitor = MirrorConnectionMonitor(android.os.SystemClock.elapsedRealtime())
+        var pageGeneration = 0
+        var pageFailed = false
+        var healthCheckInFlight = false
+        fun failPage(message: String) {
+            if (pageFailed || WebViewHolder.webView !== pageView) return
+            pageFailed = true
+            StateBus.status.value = "连接失败"
+            onLoadError(message)
+        }
+        fun updateConnectionStage() {
+            val stage = monitor.stage(android.os.SystemClock.elapsedRealtime())
+            onConnectionStage(stage)
+            when (stage) {
+                MirrorConnectionStage.CONNECTED -> StateBus.status.value = "已连接 · 保活中"
+                MirrorConnectionStage.CONNECTING -> StateBus.status.value = "正在连接镜像主机…"
+                MirrorConnectionStage.RECONNECTING -> StateBus.status.value = "连接已断开，正在尝试重连…"
+                MirrorConnectionStage.FAILED -> failPage(
+                    "暂时无法连接电脑。请确认远程控制已启动、手机与电脑网络可达，再尝试重连。",
+                )
+            }
+        }
+        val readinessWatchdog = object : Runnable {
+            override fun run() {
+                if (pageFailed || WebViewHolder.webView !== pageView) return
+                updateConnectionStage()
+                if (pageFailed) return
+                postDelayed(this, 1_500L)
+                if (healthCheckInFlight) return
+                healthCheckInFlight = true
+                val generation = pageGeneration
+                evaluateJavascript(PAGE_HEALTH_JS) { result ->
+                    if (generation != pageGeneration || pageFailed ||
+                        WebViewHolder.webView !== pageView) return@evaluateJavascript
+                    healthCheckInFlight = false
+                    monitor.record(MirrorPageHealth.parse(result), android.os.SystemClock.elapsedRealtime())
+                    updateConnectionStage()
+                }
+            }
+        }
         layoutParams = ViewGroup.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.MATCH_PARENT,
         )
         settings.javaScriptEnabled = true
+        settings.cacheMode = WebSettings.LOAD_NO_CACHE
         settings.domStorageEnabled = true
         settings.mediaPlaybackRequiresUserGesture = false
         settings.allowFileAccess = false
@@ -620,6 +679,13 @@ private fun createWebView(
 
         webViewClient = object : WebViewClient() {
             override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
+                pageGeneration++
+                healthCheckInFlight = false
+                if (pageFailed || WebViewHolder.webView !== pageView) return
+                monitor.record(MirrorPageHealth("unknown", false), android.os.SystemClock.elapsedRealtime())
+                updateConnectionStage()
+                removeCallbacks(readinessWatchdog)
+                postDelayed(readinessWatchdog, 1_500L)
                 view?.evaluateJavascript(WS_PROBE_JS, null)
             }
 
@@ -647,7 +713,7 @@ private fun createWebView(
                 error: WebResourceError,
             ) {
                 if (!request.isForMainFrame) return
-                onLoadError("网络错误：${error.description}")
+                failPage("网络错误：${error.description}。请检查电脑是否在线及远程控制是否已启动。")
             }
 
             override fun onReceivedHttpError(
@@ -655,13 +721,15 @@ private fun createWebView(
                 request: WebResourceRequest,
                 response: WebResourceResponse,
             ) {
-                if (!request.isForMainFrame) return
                 val code = response.statusCode
-                if (code == 401 || code == 403) {
-                    onLoadError(
-                        "链接已失效（HTTP $code）。桌面端重启后端口与令牌都可能变化，" +
-                            "请到「远程控制」面板重新复制链接。",
-                    )
+                val path = request.url.path.orEmpty()
+                val criticalAsset = path.contains("/assets/") &&
+                    (path.endsWith(".js") || path.endsWith(".css"))
+                if (!request.isForMainFrame && !criticalAsset) return
+                if (request.isForMainFrame && (code == 401 || code == 403)) {
+                    failPage("链接已失效（HTTP $code）。请到桌面端远程控制面板复制当前链接并重新配对。")
+                } else if (code >= 400) {
+                    failPage("镜像${if (criticalAsset) "页面资源" else "主机"}返回 HTTP $code，请刷新或检查桌面端。")
                 }
             }
 
@@ -669,6 +737,8 @@ private fun createWebView(
                 (view.parent as? ViewGroup)?.removeView(view)
                 view.destroy()
                 WebViewHolder.reset()
+                pageFailed = true
+                removeCallbacks(readinessWatchdog)
                 StateBus.recreateTick.value++
                 return true
             }
@@ -752,5 +822,7 @@ private fun createWebView(
         loadUrl(url)
         WebViewHolder.webView = this
         WebViewHolder.lastLoaded = url
+        removeCallbacks(readinessWatchdog)
+        postDelayed(readinessWatchdog, 1_500L)
     }
 }

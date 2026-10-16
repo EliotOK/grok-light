@@ -87,7 +87,8 @@ object Prefs {
         val port = when {
             uri.port > 0 -> uri.port
             scheme == "https" -> 443
-            else -> DEFAULT_MIRROR_PORT
+            bogus -> DEFAULT_MIRROR_PORT
+            else -> 80
         }
         val hostPart = if (bogus) replacement else host
         val portPart =

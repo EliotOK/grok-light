@@ -56,6 +56,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.darkColorScheme
@@ -91,12 +92,14 @@ class MainActivity : ComponentActivity() {
                 // Edge-to-edge on Android 15/16 draws under the system bars. Without
                 // this the toolbar sits behind the status bar and the user cannot
                 // reach "换链接" — the exact white-screen dead end reported on device.
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .safeDrawingPadding(),
-                ) {
-                    App()
+                Surface(modifier = Modifier.fillMaxSize()) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .safeDrawingPadding(),
+                    ) {
+                        App()
+                    }
                 }
             }
         }
@@ -611,6 +614,7 @@ private fun createWebView(
     val homePort = homeUri.port
 
     return WebView(ctx).apply {
+        setBackgroundColor(android.graphics.Color.rgb(18, 19, 24))
         val pageView = this
         var pageStartedAt = android.os.SystemClock.elapsedRealtime()
         var pageGeneration = 0

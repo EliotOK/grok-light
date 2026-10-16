@@ -342,7 +342,7 @@ private fun WebViewScreen(
     var keepOn by remember { mutableStateOf(Prefs.keepScreenOn(context)) }
     var progress by remember { mutableIntStateOf(100) }
     var menuOpen by remember { mutableStateOf(false) }
-    var loadError by remember { mutableStateOf<String?>(null) }
+    var loadError by remember(url) { mutableStateOf<String?>(null) }
     var pendingFilePathCallback by remember { mutableStateOf<ValueCallback<Array<Uri>>?>(null) }
     val webViewRef = remember { mutableStateOf<WebView?>(null) }
 

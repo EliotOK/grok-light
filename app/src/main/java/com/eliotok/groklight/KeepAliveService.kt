@@ -23,7 +23,7 @@ import androidx.core.content.ContextCompat
 
 /**
  * 前台保活服务：镜像页面跑在 WebView 里，浏览器式的后台挂起是掉线根因；
- * 本服务用「前台服务 + WakeLock + WiFi 锁 + 网络恢复自动重载 + 心跳探测」托底，
+ * 本服务用「前台服务 + WakeLock + WiFi 锁 + 网络恢复自动重载」托底，
  * 让页面在息屏、切后台、网络抖动之后仍然活着并自动恢复。
  */
 class KeepAliveService : Service() {
@@ -44,11 +44,10 @@ class KeepAliveService : Service() {
     private var connectivityManager: ConnectivityManager? = null
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
     private var hadNetwork = true
-    private var offlineStreak = 0
 
     private val watchdog = object : Runnable {
         override fun run() {
-            probe()
+            updateNotification(StateBus.status.value)
             handler.postDelayed(this, PROBE_INTERVAL_MS)
         }
     }
@@ -115,8 +114,10 @@ class KeepAliveService : Service() {
                     handler.postDelayed({
                         WebViewHolder.webView?.let { wv ->
                             handler.post {
-                                wv.reload()
-                                WebViewHolder.lastLoaded = wv.url
+                                if (WebViewHolder.webView === wv) {
+                                    wv.reload()
+                                    WebViewHolder.lastLoaded = wv.url
+                                }
                             }
                         }
                     }, 1_500L)
@@ -150,32 +151,6 @@ class KeepAliveService : Service() {
         return manager.allNetworks.any { network ->
             manager.getNetworkCapabilities(network)
                 ?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true
-        }
-    }
-
-    // ---------- 心跳探测：页面报告自己是否在线 ----------
-
-    private fun probe() {
-        val webView = WebViewHolder.webView ?: run {
-            setStatus("等待页面创建")
-            return
-        }
-        handler.post {
-            if (WebViewHolder.webView !== webView) return@post
-            webView.evaluateJavascript(PAGE_HEALTH_JS) { result ->
-                val health = MirrorPageHealth.parse(result)
-                if (health.ready && health.connection == "open") {
-                    offlineStreak = 0
-                    setStatus("已连接 · 保活中")
-                } else {
-                    offlineStreak++
-                    setStatus(if (health.ready) "实时连接已断开，等待恢复" else "镜像页面加载中…")
-                    if (offlineStreak >= 2 && hasUsableNetwork()) {
-                        offlineStreak = 0
-                        webView.reload()
-                    }
-                }
-            }
         }
     }
 

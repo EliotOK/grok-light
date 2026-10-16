@@ -161,13 +161,19 @@ class KeepAliveService : Service() {
             return
         }
         handler.post {
-            webView.evaluateJavascript("(function(){return navigator.onLine ? 'on' : 'off';})()") { result ->
-                if (result != null && result.contains("off")) {
-                    offlineStreak++
-                    if (offlineStreak >= 2) setStatus("网络离线，等待恢复")
-                } else {
+            if (WebViewHolder.webView !== webView) return@post
+            webView.evaluateJavascript(PAGE_HEALTH_JS) { result ->
+                val health = MirrorPageHealth.parse(result)
+                if (health.ready && health.connection == "open") {
                     offlineStreak = 0
                     setStatus("已连接 · 保活中")
+                } else {
+                    offlineStreak++
+                    setStatus(if (health.ready) "实时连接已断开，等待恢复" else "镜像页面加载中…")
+                    if (offlineStreak >= 2 && hasUsableNetwork()) {
+                        offlineStreak = 0
+                        webView.reload()
+                    }
                 }
             }
         }

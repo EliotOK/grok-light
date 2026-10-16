@@ -274,7 +274,7 @@ private fun PairScreen(onSave: (String) -> Unit, onCheckUpdate: () -> Unit) {
         Text(
             "提示：面板给的主机若是 198.18.x.x、127.0.0.1 这类地址，说明它挑错了网卡" +
                 "（常见于开着 Clash / Mihomo 的 TUN），此时必须填电脑真实的局域网 IP。" +
-                "另外，桌面端重启后端口和令牌都可能变化，链接要重新复制。",
+                "配对链接由桌面端保存；重新生成链接或电脑局域网 IP 改变后，需要重新配对。",
             style = MaterialTheme.typography.bodySmall,
             color = Color.Gray,
         )
@@ -469,7 +469,7 @@ private fun WebViewScreen(
             }
         } else {
             // recreateTick 变化（渲染进程崩溃 / 手动重试）时强制重建 WebView
-            key(recreateTick) {
+            key(url, recreateTick) {
                 AndroidView(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -482,6 +482,12 @@ private fun WebViewScreen(
                             onFileChooser = onFileChooser,
                             onLoadError = { loadError = it },
                         ).also { webViewRef.value = it }
+                    },
+                    onRelease = { view ->
+                        if (WebViewHolder.webView === view) WebViewHolder.reset()
+                        if (webViewRef.value === view) webViewRef.value = null
+                        view.stopLoading()
+                        view.destroy()
                     },
                 )
             }
@@ -568,7 +574,7 @@ private const val WS_PROBE_JS = """
   function Patched(url, protocols) {
     var ws = (protocols === undefined) ? new Native(url) : new Native(url, protocols);
     try {
-      window.__glProbe.state = 'open';
+      window.__glProbe.state = 'connecting';
       ws.addEventListener('open', function(){ window.__glProbe.state = 'open'; });
       ws.addEventListener('message', function(){ window.__glProbe.lastMsg = Date.now(); });
       ws.addEventListener('close', function(){ window.__glProbe.closes++; window.__glProbe.state = 'closed'; });
@@ -584,7 +590,7 @@ private const val WS_PROBE_JS = """
 
 /** Reads the probe: open / closed / error / unknown. */
 private const val WS_STATE_JS =
-    "(function(){try{var p=window.__glProbe;if(!p)return 'unknown';return p.state;}catch(e){return 'unknown';}})()"
+    "(function(){var h=window.__GROK_MIRROR_HEALTH__;var p=window.__glProbe;return h?h.connection:(p?p.state:'unknown');})()"
 
 /** Reload without cache: the mirror page is live state, never a stale snapshot. */
 private fun hardReload(webView: WebView) {
@@ -605,11 +611,43 @@ private fun createWebView(
     val homePort = homeUri.port
 
     return WebView(ctx).apply {
+        val pageView = this
+        var pageStartedAt = android.os.SystemClock.elapsedRealtime()
+        var pageGeneration = 0
+        var pageFailed = false
+        fun failPage(message: String) {
+            if (pageFailed || WebViewHolder.webView !== pageView) return
+            pageFailed = true
+            StateBus.status.value = "连接失败"
+            onLoadError(message)
+        }
+        val readinessWatchdog = object : Runnable {
+            override fun run() {
+                if (pageFailed || WebViewHolder.webView !== pageView) return
+                val generation = pageGeneration
+                evaluateJavascript(PAGE_HEALTH_JS) { result ->
+                    if (generation != pageGeneration || pageFailed) return@evaluateJavascript
+                    val health = MirrorPageHealth.parse(result)
+                    if (health.ready && health.connection == "open") {
+                        StateBus.status.value = "已连接 · 保活中"
+                    } else if (android.os.SystemClock.elapsedRealtime() - pageStartedAt > 30_000L) {
+                        failPage(
+                            if (!health.ready) "镜像页面未能完成加载。请重试，并检查桌面端远程控制是否已启动。"
+                            else "镜像页面已加载，但实时连接未建立。请检查同一 Wi-Fi 设置与防火墙后重试。",
+                        )
+                    } else {
+                        StateBus.status.value = "正在连接镜像主机…"
+                        postDelayed(this, 1_500L)
+                    }
+                }
+            }
+        }
         layoutParams = ViewGroup.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.MATCH_PARENT,
         )
         settings.javaScriptEnabled = true
+        settings.cacheMode = WebSettings.LOAD_NO_CACHE
         settings.domStorageEnabled = true
         settings.mediaPlaybackRequiresUserGesture = false
         settings.allowFileAccess = false
@@ -620,6 +658,11 @@ private fun createWebView(
 
         webViewClient = object : WebViewClient() {
             override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
+                pageGeneration++
+                pageStartedAt = android.os.SystemClock.elapsedRealtime()
+                pageFailed = false
+                removeCallbacks(readinessWatchdog)
+                postDelayed(readinessWatchdog, 1_500L)
                 view?.evaluateJavascript(WS_PROBE_JS, null)
             }
 
@@ -647,7 +690,7 @@ private fun createWebView(
                 error: WebResourceError,
             ) {
                 if (!request.isForMainFrame) return
-                onLoadError("网络错误：${error.description}")
+                failPage("网络错误：${error.description}。请检查电脑是否在线及远程控制是否已启动。")
             }
 
             override fun onReceivedHttpError(
@@ -655,13 +698,15 @@ private fun createWebView(
                 request: WebResourceRequest,
                 response: WebResourceResponse,
             ) {
-                if (!request.isForMainFrame) return
                 val code = response.statusCode
-                if (code == 401 || code == 403) {
-                    onLoadError(
-                        "链接已失效（HTTP $code）。桌面端重启后端口与令牌都可能变化，" +
-                            "请到「远程控制」面板重新复制链接。",
-                    )
+                val path = request.url.path.orEmpty()
+                val criticalAsset = path.contains("/assets/") &&
+                    (path.endsWith(".js") || path.endsWith(".css"))
+                if (!request.isForMainFrame && !criticalAsset) return
+                if (request.isForMainFrame && (code == 401 || code == 403)) {
+                    failPage("链接已失效（HTTP $code）。请到桌面端远程控制面板复制当前链接并重新配对。")
+                } else if (code >= 400) {
+                    failPage("镜像${if (criticalAsset) "页面资源" else "主机"}返回 HTTP $code，请刷新或检查桌面端。")
                 }
             }
 
@@ -669,6 +714,8 @@ private fun createWebView(
                 (view.parent as? ViewGroup)?.removeView(view)
                 view.destroy()
                 WebViewHolder.reset()
+                pageFailed = true
+                removeCallbacks(readinessWatchdog)
                 StateBus.recreateTick.value++
                 return true
             }
